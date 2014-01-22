@@ -1,0 +1,15 @@
+#
+# libcec-daemon will autodetect the HDMI port it is connected to 
+#
+
+# but in case detection fails or is incorrect, the correct HDMI port can be
+# set as follow:
+
+# port 1 on TV
+#HDMI_PORT=tv.1
+
+# port 1 on a connected audio system
+#HDMI_PORT=av.1
+
+# or as a hardcoded physical address
+#HDMI_PORT=1.0.0.0

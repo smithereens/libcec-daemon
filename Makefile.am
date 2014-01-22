@@ -17,6 +17,9 @@ dist_noinst_SCRIPTS = bootstrap
 dist_bin_SCRIPTS = share/mythbuntu/bin/myth-control \
                    share/mythbuntu/bin/myth-status
 
+confdir= $(sysconfdir)/default
+dist_conf_DATA = share/mythbuntu/conf/libcec-daemon
+
 udevdir= $(sysconfdir)/udev/rules.d
 dist_udev_DATA = share/mythbuntu/udev/libcec-daemon.rules \
                  share/mythbuntu/udev/pulse-eight-hdmi-cec-usb.rules
