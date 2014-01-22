@@ -1,0 +1,48 @@
+#!/usr/bin/env python
+#
+# Query mythtv frontend status via socket interface
+# status currently supported:
+#   - playing: playback in progress and playing
+#   - paused: playback in progress and paused
+#   - idle: no playback in progress
+#
+
+import socket
+import signal
+import re
+
+status=1
+
+#
+# expect lookalike function:
+# read and buffer input till pattern is found or fail after 30 seconds
+#
+def expect(fd, pattern):
+    prog = re.compile(pattern)
+    signal.alarm(30)
+    data = fd.recv(16)
+    while prog.search(data) is None:
+        data += fd.recv(16)
+    signal.alarm(0)
+    return data
+
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect(("127.0.0.1", 6546))
+    expect(s, "#")
+    s.send("query location\n")
+    location = expect(s, "#")
+    if re.match("Playback (LiveTV|Recorded)", location):
+        if location.find("pause") < 0:
+           print "playing"
+        else:
+           print "paused"
+    else:
+        print "idle"
+    s.send("quit\n")
+    status=0
+except Exception as e:
+    print "error in connection"
+finally:
+    s.close()
+    exit(status)

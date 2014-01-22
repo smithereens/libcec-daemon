@@ -1,0 +1,7 @@
+#
+# tell udev to creates a symlink to libcec-daemon current input so that following lircd.conf
+# is always valid:
+# LIRC_DEVICE="/dev/input/by-id/libcec-daemon"
+# LIRC_DRIVER="devinput"
+# 
+KERNEL=="event*", ATTRS{name}=="libcec-daemon", SYMLINK="input/by-id/libcec-daemon"

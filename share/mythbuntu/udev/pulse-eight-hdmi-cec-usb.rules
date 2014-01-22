@@ -1,0 +1,16 @@
+#
+# Pulse-Eight HDMI-CEC USB Adapter
+#
+# Once Adapter is detected or removed, upstart emits either hdmi-cec-start or hdmi-cec-stop events
+#
+
+ATTRS{idVendor}=="2548",ATTRS{idProduct}=="1002",GOTO="pulse-eight-hdmi-cec"
+GOTO="pulse-eight-hdmi-end"
+
+LABEL="pulse-eight-hdmi-cec"
+
+# make sure modem-manager ignore this serial device 
+SUBSYSTEM=="tty",ACTION=="add",ENV{ID_MM_DEVICE_IGNORE}="1",ENV{ID_MM_CANDIDATE}="",RUN+="/sbin/initctl emit --no-wait hdmi-cec-start DEVPATH=%p"
+SUBSYSTEM=="tty",ACTION=="remove",RUN+="/sbin/initctl emit --no-wait hdmi-cec-stop DEVPATH=%p"
+
+LABEL="pulse-eight-hdmi-end"

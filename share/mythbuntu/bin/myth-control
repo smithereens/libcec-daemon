@@ -1,0 +1,43 @@
+#!/usr/bin/env python
+#
+# control mythtv frontend via socket interface
+# commands currently supported:
+#   - pause: pause playback
+#   - idle: stop playback and go back to main menu
+#
+import socket
+import signal
+import re
+import sys
+
+if len(sys.argv) != 2:
+    exit(1)
+
+#
+# expect lookalike function
+# read and buffer input till pattern is found or fail after 30 seconds
+#
+def expect(fd, pattern):
+    prog = re.compile(pattern)
+    signal.alarm(30)
+    data = fd.recv(16)
+    while prog.search(data) is None:
+        data += fd.recv(16)
+    signal.alarm(0)
+    return data
+
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect(("127.0.0.1", 6546))
+    expect(s, "#")
+    if sys.argv[1] == 'idle':
+        s.send("jump mainmenu\n")
+        expect(s, "OK")
+    elif sys.argv[1] == 'pause':
+        s.send("play speed pause\n")
+        expect(s, "OK")
+    s.send("quit\n")
+except Exception as e:
+    print "error in connection"
+finally:
+    s.close()
