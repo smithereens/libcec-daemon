@@ -40,7 +40,7 @@ using std::endl;
 using std::min;
 using std::string;
 using std::vector;
-using std::queue;
+using std::deque;
 using std::list;
 
 static Logger logger = Logger::getInstance("main");
@@ -68,7 +68,7 @@ Main & Main::instance() {
 }
 
 Main::Main() : cec(this), uinput(UINPUT_NAME, uinputCecMap),
-    makeActive(true), running(false), lastUInputKeys({ }), myAddress(CECDEVICE_UNKNOWN)
+    running(false), isActive(false), lastUInputKeys({ }), myAddress(CECDEVICE_UNKNOWN)
 {
     LOG4CPLUS_TRACE_STR(logger, "Main::Main()");
 }
@@ -78,7 +78,7 @@ Main::~Main() {
     stop();
 }
 
-void Main::loop(const string & device) {
+void Main::loop(const string & device, bool makeActive) {
     LOG4CPLUS_TRACE_STR(logger, "Main::loop()");
 
     struct sigaction action;
@@ -91,88 +91,121 @@ void Main::loop(const string & device) {
 
     do
     {
+        /* we are running but not yet active */
+        running = true;
+        isActive = false;
+
         /* if needed, libcec will take care of activating device for us */
         myAddress = cec.open(device, makeActive);
 
-        running = true;
-
-        /* install signals */
-        sigaction (SIGHUP,  &action, NULL);
-        sigaction (SIGINT,  &action, NULL);
-        sigaction (SIGTERM, &action, NULL);
-
-        do
+        /*
+        ** following is probably never false, but it provides a convenient
+        ** RAII context for libcec_lock
+        */
+        if( myAddress != CECDEVICE_UNKNOWN )
         {
             boost::unique_lock<boost::mutex> libcec_lock(libcec_sync);
 
-            while( running && !commands.empty() )
+            /* install signals */
+            sigaction (SIGHUP,  &action, NULL);
+            sigaction (SIGINT,  &action, NULL);
+            sigaction (SIGTERM, &action, NULL);
+
+            do
             {
-                Command cmd = commands.front();
-                switch( cmd.command )
+                while( !commands.empty() )
                 {
-                    case COMMAND_STANDBY:
-                        if( ! onStandbyCommand.empty() )
-                        {
-                            LOG4CPLUS_DEBUG(logger, "Standby: Running \"" << onStandbyCommand << "\"");
-                            int ret = system(onStandbyCommand.c_str());
-                            if( ret )
-                                LOG4CPLUS_ERROR(logger, "Standby command failed: " << ret);
-                            
-                        }
-                        else
-                        {
-                            onCecKeyPress( CEC_USER_CONTROL_CODE_POWER );
-                        }
-                        break;
-                    case COMMAND_ACTIVE:
-                        /* remember active state */
-                        makeActive = true;
-                        if( ! onActivateCommand.empty() )
-                        {
-                            LOG4CPLUS_DEBUG(logger, "Activated: Running \"" << onActivateCommand << "\"");
-                            int ret = system(onActivateCommand.c_str());
-                            if( ret )
-                                LOG4CPLUS_ERROR(logger, "Activate command failed: " << ret);
-                        }
-                        break;
-                    case COMMAND_INACTIVE:
-                        /* remember active state */
-                        makeActive = false;
-                        if( ! onDeactivateCommand.empty() )
-                        {
-                            LOG4CPLUS_DEBUG(logger, "Deactivated: Running \"" << onDeactivateCommand << "\"");
-                            int ret = system(onDeactivateCommand.c_str());
-                            if( ret )
-                                LOG4CPLUS_ERROR(logger, "Deactivate command failed: " << ret);
-                        }
-                        break;
-                    case COMMAND_KEYPRESS:
-                        onCecKeyPress( cmd.keycode );
-                        break;
-                    case COMMAND_RESTART:
-                        running = false;
-                        restart = true;
-                        break;
-                    case COMMAND_EXIT:
-                        running = false;
-                        break;
+                    Command cmd = commands.front();
+                    commands.pop_front();
+                    switch( cmd.command )
+                    {
+                        case COMMAND_STANDBY:
+                            if( ! onStandbyCommand.empty() )
+                            {
+                                LOG4CPLUS_DEBUG(logger, "Standby: Running \"" << onStandbyCommand << "\"");
+                                int ret = system(onStandbyCommand.c_str());
+                                if( ret )
+                                    LOG4CPLUS_ERROR(logger, "Standby command failed: " << ret);
+                            }
+                            else
+                            {
+                                onKeyPress( CEC_USER_CONTROL_CODE_POWER );
+                            }
+                            break;
+                        case COMMAND_ACTIVE:
+                            if( ! isActive )
+                            {
+                                /* remember active state */
+                                isActive = true;
+                                if( ! onActivateCommand.empty() )
+                                {
+                                    LOG4CPLUS_DEBUG(logger, "Activated: Running \"" << onActivateCommand << "\"");
+                                    int ret = system(onActivateCommand.c_str());
+                                    if( ret )
+                                        LOG4CPLUS_ERROR(logger, "Activate command failed: " << ret);
+                                }
+                            }
+                            break;
+                        case COMMAND_INACTIVE:
+                            /* remember active state */
+                            if( isActive )
+                            {
+                                isActive = false;
+                                if( ! onDeactivateCommand.empty() )
+                                {
+                                    LOG4CPLUS_DEBUG(logger, "Deactivated: Running \"" << onDeactivateCommand << "\"");
+                                    int ret = system(onDeactivateCommand.c_str());
+                                    if( ret )
+                                        LOG4CPLUS_ERROR(logger, "Deactivate command failed: " << ret);
+                                }
+                            }
+                            break;
+                        case COMMAND_KEYPRESS:
+                            onKeyPress( cmd.keycode );
+                            break;
+                        case COMMAND_RESTART:
+                            restart = true;
+                            // fall through
+                        case COMMAND_EXIT:
+                            running = false;
+                            commands.clear();
+                            break;
+                    }
                 }
-                commands.pop();
+                if( running )
+                {
+                    /* while idle, ping device adapter on a regular basis */
+                    int retries=0;
+                    static const int delays[] = { 23, 13, 5, 2 };
+                    while( !libcec_cond.timed_wait(libcec_lock, boost::posix_time::seconds(delays[retries])) )
+                    {
+                        /* ping adapter, could fail during suspend/resume operations */ 
+                        if( cec.ping() )
+                        {
+                            /* ping successful, reset retries */
+                           retries = 0;
+                        }
+                        else if( ++retries >= (sizeof(delays)/sizeof(delays[0])) )
+                        {
+                            /* ping failed too many times in a row */
+                            running = false;
+                            break;
+                        }
+                    }
+                }
             }
-            /* while idle, ping device adapter on a regular basis */
-            while( running && !libcec_cond.timed_wait(libcec_lock, boost::posix_time::seconds(43)) )
-            {
-                running = cec.ping();
-            }
+            while( running );
+
+            /* reset signals */
+            signal (SIGHUP,  SIG_DFL);
+            signal (SIGINT,  SIG_DFL);
+            signal (SIGTERM, SIG_DFL);
+
         }
-        while( running );
+        else
+            LOG4CPLUS_ERROR(logger, "logical address is invalid");
 
-        /* reset signals */
-        signal (SIGHUP,  SIG_DFL);
-        signal (SIGINT,  SIG_DFL);
-        signal (SIGTERM, SIG_DFL);
-
-        cec.close(!restart);
+        cec.close(isActive && !restart);
     }
     while( restart );
 }
@@ -181,7 +214,7 @@ void Main::push(Command cmd) {
     boost::lock_guard<boost::mutex> lock(libcec_sync);
     if( running )
     {
-        commands.push(cmd);
+        commands.push_back(cmd);
         libcec_cond.notify_one();
     }
 }
@@ -304,14 +337,7 @@ const std::vector<list<__u16>> & Main::setupUinputMap() {
     return uinputCecMap;
 }
 
-int Main::onCecLogMessage(const cec_log_message &message) {
-    LOG4CPLUS_DEBUG(logger, "Main::onCecLogMessage(" << message << ")");
-    return 1;
-}
-
-int Main::onCecKeyPress(const cec_keypress &key) {
-    LOG4CPLUS_DEBUG(logger, "Main::onCecKeyPress(" << key << ")");
-
+void Main::onKeyPress(const cec_keypress &key) {
     // Check bounds and find uinput code for this cec keypress
     if (key.keycode >= 0 && key.keycode <= CEC_USER_CONTROL_CODE_MAX) {
         const list<__u16> & uinputKeys = uinputCecMap[key.keycode];
@@ -394,25 +420,33 @@ int Main::onCecKeyPress(const cec_keypress &key) {
             uinput.sync();
         }
     }
-
-    return 1;
 }
 
-int Main::onCecKeyPress(const cec_user_control_code & keycode) {
+void Main::onKeyPress(const cec_user_control_code & keycode) {
     cec_keypress key;
 
     /* PUSH KEY */
     key.keycode=keycode;
-    key.duration = 0;
-    onCecKeyPress( key );
+    key.duration = 100;
+    onKeyPress( key );
 
     /* simulate delay */
     key.duration = 100;
     boost::this_thread::sleep(boost::posix_time::milliseconds(key.duration));
 
     /* RELEASE KEY */
-    onCecKeyPress( key );
+    onKeyPress( key );
+}
 
+int Main::onCecLogMessage(const cec_log_message &message) {
+    LOG4CPLUS_DEBUG(logger, "Main::onCecLogMessage(" << message << ")");
+    return 1;
+}
+
+int Main::onCecKeyPress(const cec_keypress &key) {
+    boost::lock_guard<boost::mutex> lock(libcec_sync);
+    LOG4CPLUS_DEBUG(logger, "Main::onCecKeyPress(" << key << ")");
+    onKeyPress(key);
     return 1;
 }
 
@@ -425,23 +459,6 @@ int Main::onCecCommand(const cec_command & command) {
                          && ( (command.destination == CECDEVICE_BROADCAST) || (command.destination == myAddress))  )
             {
                 push(Command(COMMAND_STANDBY));
-            }
-            break;
-        case CEC_OPCODE_REQUEST_ACTIVE_SOURCE:
-            if( (command.initiator == CECDEVICE_TV)
-                         && ( (command.destination == CECDEVICE_BROADCAST) || (command.destination == myAddress))  )
-            {
-                if( makeActive )
-                {
-                    /* remind TV we are active */
-                    push(Command(COMMAND_ACTIVE));
-                }
-            }
-        case CEC_OPCODE_SET_MENU_LANGUAGE:
-            if( (command.initiator == CECDEVICE_TV) && (command.parameters.size == 3)
-                         && ( (command.destination == CECDEVICE_BROADCAST) || (command.destination == myAddress))  )
-            {
-                /* TODO */
             }
             break;
         case CEC_OPCODE_DECK_CONTROL:
@@ -498,9 +515,12 @@ int Main::onCecConfigurationChanged(const libcec_configuration & configuration) 
 
 
 int Main::onCecMenuStateChanged(const cec_menu_state & menu_state) {
+    boost::lock_guard<boost::mutex> lock(libcec_sync);
     LOG4CPLUS_DEBUG(logger, "Main::onCecMenuStateChanged(" << menu_state << ")");
 
-    return onCecKeyPress(CEC_USER_CONTROL_CODE_CONTENTS_MENU);
+    onKeyPress(CEC_USER_CONTROL_CODE_CONTENTS_MENU);
+
+    return 1;
 }
 
 void Main::onCecSourceActivated(const cec_logical_address & address, bool bActivated) {
@@ -565,7 +585,7 @@ int main (int argc, char *argv[]) {
         ("verbose,v", accumulator<int>(&loglevel)->implicit_value(1), "verbose output (use -vv for more)")
         ("quiet,q",   "quiet output (print almost nothing)")
         ("donotactivate,a", "do not activate device on startup")
-        ("name", value<string>()->value_name("<string>"), "identification name (defaults to hostname)")
+        ("name,n", value<string>()->value_name("<string>"), "display name (defaults to hostname)")
         ("onstandby", value<string>()->value_name("<path>"),  "command to run on standby")
         ("onactivate", value<string>()->value_name("<path>"),  "command to run on activation")
         ("ondeactivate", value<string>()->value_name("<path>"),  "command to run on deactivation")
@@ -618,6 +638,7 @@ int main (int argc, char *argv[]) {
         // Create the main
         Main & main = Main::instance();
         string device = "";
+        bool makeActive = true;
 
         if (vm.count("list")) {
             main.listDevices();
@@ -625,7 +646,7 @@ int main (int argc, char *argv[]) {
         }
 
         if (vm.count("donotactivate")) {
-            main.setMakeActive(false);
+            makeActive = false;
         }
 
         if (vm.count("usb")) {
@@ -657,7 +678,7 @@ int main (int argc, char *argv[]) {
                 return -1;
         }
 
-        main.loop(device);
+        main.loop(device, makeActive);
 
     } catch (std::exception & e) {
         cerr << e.what() << endl;
